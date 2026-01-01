@@ -93,8 +93,50 @@ Open PowerShell in the script directory and run:
 ```powershell
 .\Get-ServerHealthReport.ps1
 
+Multiple Servers
+.\Get-ServerHealthReport.ps1 -ComputerName SRV01,SRV02
+
+Single Combined Report
+.\Get-ServerHealthReport.ps1 -ComputerName SRV01,SRV02 -AsSingleReport
+
+Adjust Health Thresholds
+.\Get-ServerHealthReport.ps1 `
+  -ThresholdDiskFreePct 20 `
+  -ThresholdCpuLoadPct 80 `
+  -ThresholdMemUsedPct 85 `
+  -EventLookbackHours 12
+
+Output Location
+
+By default, reports and logs are written to:
+output/
+├── reports/
+│   ├── *_HealthReport_*.html
+│   └── *_HealthReport_*.json
+└── logs/
+    └── Get-ServerHealthReport_YYYYMMDD.log
 ---
 
+
+Common Issues & Resolutions
+Scripts will not run (Execution Policy)
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+Remote servers show as unreachable
+
+Ensure WinRM is enabled on the target system:
+Enable-PSRemoting -Force
+
+Event log access fails remotely
+
+Event log access depends on permissions and policy.
+You may skip event log collection if needed:
+.\Get-ServerHealthReport.ps1 -SkipEventLogs
+
+Hotfix collection fails or is slow
+.\Get-ServerHealthReport.ps1 -SkipHotfix
+
+```
 ## 🛡️ Design Principles
 
 * **No hardcoded environment values** (domains, paths, credentials)
