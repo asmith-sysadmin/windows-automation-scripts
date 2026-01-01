@@ -680,3 +680,8 @@ Write-Log -Level "INFO" -Message "Run completed."
 ---
 
 ## Notes 
+Structured JSON logs (easy to ship to Splunk/ELK later)
+Separate HTML + JSON outputs (ops + automation use-cases)
+Per-host fault tolerance (one bad server doesn’t break the run)
+No hardcoding (domain/path/credentials)
+Extensible (you can add thresholds + “overall health score” next)
