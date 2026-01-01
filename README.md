@@ -91,14 +91,17 @@ using configurable thresholds to produce a **Health Score (0–100)**.
 Open PowerShell in the script directory and run:
 
 ```powershell
-.\Get-ServerHealthReport.ps1
 
+.\Get-ServerHealthReport.ps1
+```
 Multiple Servers
 .\Get-ServerHealthReport.ps1 -ComputerName SRV01,SRV02
-
+```
+```
 Single Combined Report
 .\Get-ServerHealthReport.ps1 -ComputerName SRV01,SRV02 -AsSingleReport
-
+```
+```
 Adjust Health Thresholds
 .\Get-ServerHealthReport.ps1 `
   -ThresholdDiskFreePct 20 `
@@ -106,6 +109,7 @@ Adjust Health Thresholds
   -ThresholdMemUsedPct 85 `
   -EventLookbackHours 12
 
+```
 Output Location
 
 By default, reports and logs are written to:
