@@ -52,7 +52,7 @@ Generates a comprehensive server health report including CPU, memory, disk usage
 **Description:**
 Audits Windows patch compliance by checking installed updates, pending reboot state, and update configuration (Windows Update / WSUS). Produces a pass/fail compliance report per system.
 
-**Status:** Planned
+**Status:** Implemented
 
 ---
 
@@ -152,6 +152,18 @@ Hotfix collection fails or is slow
 .\Get-ServerHealthReport.ps1 -SkipHotfix
 ```
 
+---
+
+## ✅ Invoke-PatchComplianceAudit.ps1 — Usage & Troubleshooting
+
+Audits Windows patch compliance based on last installed update recency and pending reboot state.
+Outputs HTML + JSON + structured logs and includes a compliance score.
+
+### Basic Usage (Local)
+
+```powershell
+.\Invoke-PatchComplianceAudit.ps1
+``` 
 ## 🛡️ Design Principles
 
 * **No hardcoded environment values** (domains, paths, credentials)
