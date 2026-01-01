@@ -680,5 +680,3 @@ Write-Log -Level "INFO" -Message "Run completed."
 ---
 
 ## Notes 
-
-If you say “add thresholds + score”, I’ll patch the script accordingly (still clean + resume-safe).
