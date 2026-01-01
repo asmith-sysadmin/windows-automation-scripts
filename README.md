@@ -42,7 +42,7 @@ Applies a standardized Windows server baseline configuration, including security
 **Description:**
 Generates a comprehensive server health report including CPU, memory, disk usage, critical services, recent event log errors, patch status, uptime, and network configuration. Exports results to HTML and JSON.
 
-**Status:** Planned
+**Status:** Implemented
 
 ---
 
@@ -73,6 +73,25 @@ Collects and archives critical system configuration and log data, including even
 Provides a controlled, auditable toolkit for onboarding and offboarding users. Supports account creation templates, account disablement, group membership capture, and safe execution modes.
 
 **Status:** Planned
+
+---
+
+## 🔍 Get-ServerHealthReport.ps1 — Usage & Troubleshooting
+
+This script generates a **Windows Server Health Report** and evaluates system health
+using configurable thresholds to produce a **Health Score (0–100)**.
+
+### What it Produces
+- **HTML report** (open in a browser)
+- **JSON report** (automation / future ingestion)
+- **Structured log file** (execution audit trail)
+
+### Basic Usage (Local System)
+
+Open PowerShell in the script directory and run:
+
+```powershell
+.\Get-ServerHealthReport.ps1
 
 ---
 
