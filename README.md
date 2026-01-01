@@ -163,7 +163,60 @@ Outputs HTML + JSON + structured logs and includes a compliance score.
 
 ```powershell
 .\Invoke-PatchComplianceAudit.ps1
-``` 
+```
+
+Multiple Servers
+```
+.\Invoke-PatchComplianceAudit.ps1 -ComputerName SRV01,SRV02
+```
+
+One Combined Report
+```
+.\Invoke-PatchComplianceAudit.ps1 -ComputerName SRV01,SRV02 -AsSingleReport
+```
+
+Stricter Compliance Thresholds
+```
+.\Invoke-PatchComplianceAudit.ps1 -WarnPatchAgeDays 7 -MaxPatchAgeDays 14
+```
+
+Output Location
+```
+output/
+├── reports/
+│   ├── *_PatchCompliance_*.html
+│   └── *_PatchCompliance_*.json
+└── logs/
+    └── Invoke-PatchComplianceAudit_YYYYMMDD.log
+```
+Common Issues & Resolutions
+
+Hotfix query fails or is slow
+Skip hotfix checks (best-effort):
+```
+.\Invoke-PatchComplianceAudit.ps1 -SkipHotfix
+```
+
+Remote compliance is missing reboot state
+Remote pending reboot detection is best-effort by default. If your environment allows,
+this can be extended later using Invoke-Command.
+
+For full technical details, see:
+docs/Invoke-PatchComplianceAudit-Spec.md
+```
+Commit message suggestion:
+`Document PatchComplianceAudit usage`
+
+---
+
+# Step 3: Quick run test (on your PC)
+
+From the script folder, run:
+
+```powershell
+.\Invoke-PatchComplianceAudit.ps1
+```
+
 ## 🛡️ Design Principles
 
 * **No hardcoded environment values** (domains, paths, credentials)
