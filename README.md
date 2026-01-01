@@ -1,4 +1,4 @@
-# windows-automation-scripts
+# Windows-Automation-Scripts
 
 PowerShell automation toolkit for Windows system administration and infrastructure engineering. This repository is designed to demonstrate real-world, production-oriented scripting practices used by system administrators and infrastructure engineers.
 
