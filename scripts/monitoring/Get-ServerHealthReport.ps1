@@ -1,88 +1,13 @@
-## Script Spec: `Get-ServerHealthReport.ps1`
-
-### Goal
-
-Generate a **Windows Server Health Report** for one or more computers and export results to:
-
-* **HTML** (human-friendly)
-* **JSON** (automation-friendly)
-* **Log file** (auditable execution trail)
-
-### What it collects (per computer)
-
-**System**
-
-* Hostname, domain/workgroup, OS name/version/build
-* Boot time, uptime
-* CPU model + core count
-* Physical memory total
-
-**Performance snapshot**
-
-* CPU load %
-* Memory used %
-* Top 5 processes by CPU
-* Top 5 processes by Working Set (RAM)
-
-**Disk**
-
-* Local logical disks (Drive, Size GB, Free GB, Free %)
-
-**Services**
-
-* Status of “critical services” (configurable list)
-* Detects missing services too
-
-**Event Logs**
-
-* Count + samples of recent **Error/Critical** events (last X hours) from:
-
-  * System
-  * Application
-
-**Updates / Reboot**
-
-* Last installed hotfix date (best-effort via `Get-HotFix`)
-* “Pending reboot” indicators (best-effort registry checks)
-
-**Network**
-
-* IPv4 addresses (non-APIPA), default gateway, DNS servers
-
-### Outputs
-
-* `reports\<ComputerName>_HealthReport_<timestamp>.html`
-* `reports\<ComputerName>_HealthReport_<timestamp>.json`
-* `logs\Get-ServerHealthReport_<date>.log`
-
-### Execution modes
-
-* Local: default (`$env:COMPUTERNAME`)
-* Remote: `-ComputerName server1,server2` using CIM (WinRM)
-* Credential optional (`-Credential`) for remote access
-* `-SkipEventLogs` and `-SkipHotfix` for restricted environments
-* `-WhatIf` support for file writing steps
-
-### Safety / Professional standards
-
-* No secrets, no hardcoded domains/paths
-* Errors handled per-computer so one failure doesn’t kill the run
-* Logs include correlation ID per run
-* JSON output is consistent schema (easy to parse)
-
----
-
-## PowerShell Script Scaffold 
-
-```powershell
 <#
 .SYNOPSIS
-Generates a Windows Server Health Report (HTML + JSON) with structured logging.
+Generates a Windows Server Health Report (HTML + JSON) with structured logging and a health score.
 
 .DESCRIPTION
 Collects key health signals for one or more computers: OS/system info, uptime, CPU/memory snapshot,
 disk utilization, critical services status, recent error/critical events, hotfix recency, pending reboot,
 and basic network configuration. Exports a readable HTML report plus a machine-readable JSON artifact.
+
+Includes configurable thresholds and a score (0–100) with findings.
 
 .PARAMETER ComputerName
 One or more computer names. Defaults to the local computer.
@@ -108,8 +33,26 @@ Skips hotfix collection (some systems restrict Get-HotFix).
 .PARAMETER AsSingleReport
 If specified, builds a single combined HTML/JSON report for all computers.
 
+.PARAMETER ThresholdDiskFreePct
+Warn if any local disk free percent is below this threshold.
+
+.PARAMETER ThresholdCpuLoadPct
+Warn if CPU load percent is at or above this threshold.
+
+.PARAMETER ThresholdMemUsedPct
+Warn if memory used percent is at or above this threshold.
+
+.PARAMETER EventWarnCount
+Warn if total Error/Critical events in the lookback window meets/exceeds this count.
+
+.PARAMETER EventCritCount
+Critical if total Error/Critical events in the lookback window meets/exceeds this count.
+
 .EXAMPLE
-.\Get-ServerHealthReport.ps1 -ComputerName SRV01,SRV02 -OutputPath .\out -EventLookbackHours 24
+.\Get-ServerHealthReport.ps1
+
+.EXAMPLE
+.\Get-ServerHealthReport.ps1 -ComputerName SRV01,SRV02 -AsSingleReport -ThresholdDiskFreePct 20
 
 .NOTES
 Author: Austin Smith
@@ -142,7 +85,28 @@ param(
 
     [switch] $SkipEventLogs,
     [switch] $SkipHotfix,
-    [switch] $AsSingleReport
+    [switch] $AsSingleReport,
+
+    # ---- Thresholds / Scoring
+    [Parameter()]
+    [ValidateRange(1,100)]
+    [int] $ThresholdDiskFreePct = 15,
+
+    [Parameter()]
+    [ValidateRange(1,100)]
+    [int] $ThresholdCpuLoadPct = 85,
+
+    [Parameter()]
+    [ValidateRange(1,100)]
+    [int] $ThresholdMemUsedPct = 90,
+
+    [Parameter()]
+    [ValidateRange(0,10000)]
+    [int] $EventWarnCount = 25,
+
+    [Parameter()]
+    [ValidateRange(0,10000)]
+    [int] $EventCritCount = 100
 )
 
 Set-StrictMode -Version Latest
@@ -186,7 +150,7 @@ function Write-Log {
         computer  = $Computer
         message   = $Message
         data      = $Data
-    } | ConvertTo-Json -Depth 6 -Compress
+    } | ConvertTo-Json -Depth 8 -Compress
 
     Add-Content -Path $LogFile -Value $entry
 }
@@ -215,39 +179,31 @@ function Get-PendingRebootStatus {
         [Microsoft.Management.Infrastructure.CimSession] $CimSession
     )
 
-    # Best-effort checks; return booleans plus details
     $result = [ordered]@{
         pendingReboot = $false
         indicators    = @()
+        note          = $null
     }
 
     try {
-        # Registry paths commonly used to indicate reboot required
         $paths = @(
             "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending",
             "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
             "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\PendingFileRenameOperations"
         )
 
-        foreach ($path in $paths) {
-            try {
-                if ($Target -eq $env:COMPUTERNAME) {
-                    if (Test-Path $path) {
-                        $result.pendingReboot = $true
-                        $result.indicators += $path
-                    }
+        if ($Target -eq $env:COMPUTERNAME) {
+            foreach ($path in $paths) {
+                if (Test-Path $path) {
+                    $result.pendingReboot = $true
+                    $result.indicators += $path
                 }
-                else {
-                    # Remote registry read via CIM is non-trivial without extra dependencies;
-                    # We do a best-effort WMI/CIM based check for pending rename operations.
-                    # For enterprise, you might extend this via Invoke-Command or Remote Registry service.
-                    if ($path -like "*PendingFileRenameOperations") {
-                        $os = Get-CimInstance -ClassName Win32_OperatingSystem -CimSession $CimSession
-                        # Placeholder indicator: if uptime is very long + patch recency suggests pending reboot, flag in summary.
-                        # Keep conservative; do not assert pending reboot without a signal.
-                    }
-                }
-            } catch { }
+            }
+        }
+        else {
+            # Remote registry reads are environment-dependent.
+            # Resume-safe approach: don't claim "pending reboot" remotely unless you implement a proven remote method.
+            $result.note = "Remote pending reboot detection is best-effort; extend via Invoke-Command/RemoteRegistry if needed."
         }
     }
     catch {
@@ -260,19 +216,15 @@ function Get-PendingRebootStatus {
 function Get-EventLogSummary {
     param(
         [Parameter(Mandatory)][string] $Target,
-        [int] $LookbackHours,
-        [Microsoft.Management.Infrastructure.CimSession] $CimSession
+        [int] $LookbackHours
     )
 
     $since = (Get-Date).AddHours(-1 * $LookbackHours)
-
     $logs = @("System","Application")
     $out = @()
 
     foreach ($logName in $logs) {
         try {
-            # Get-WinEvent remote supports -ComputerName, but credentials are tricky;
-            # We'll use it for local OR remote without creds requirement. If creds are required, user can run under context or extend with Invoke-Command.
             $filter = @{
                 LogName   = $logName
                 Level     = 1,2 # Critical=1, Error=2
@@ -291,7 +243,7 @@ function Get-EventLogSummary {
                     id          = $_.Id
                     provider    = $_.ProviderName
                     level       = $_.LevelDisplayName
-                    message     = ($_.Message -replace "\r?\n"," " ) -replace "\s{2,}"," "
+                    message     = (($_.Message -replace "\r?\n"," ") -replace "\s{2,}"," ").Trim()
                 }
             }
 
@@ -315,6 +267,98 @@ function Get-EventLogSummary {
     }
 
     return $out
+}
+
+function Get-HealthAssessment {
+    param(
+        [Parameter(Mandatory)] $HealthObject,
+        [Parameter(Mandatory)][int] $ThresholdDiskFreePct,
+        [Parameter(Mandatory)][int] $ThresholdCpuLoadPct,
+        [Parameter(Mandatory)][int] $ThresholdMemUsedPct,
+        [Parameter(Mandatory)][int] $EventWarnCount,
+        [Parameter(Mandatory)][int] $EventCritCount
+    )
+
+    $score = 100
+    $findings = New-Object System.Collections.Generic.List[string]
+    $status = "OK"
+
+    function Set-Status([string]$NewStatus) {
+        $rank = @{ "OK" = 0; "WARN" = 1; "CRITICAL" = 2 }
+        if ($rank[$NewStatus] -gt $rank[$status]) { $status = $NewStatus }
+    }
+
+    # CPU
+    if ($null -ne $HealthObject.snapshot.cpuLoadPct -and $HealthObject.snapshot.cpuLoadPct -ge $ThresholdCpuLoadPct) {
+        $score -= 15
+        $findings.Add(("High CPU load: {0}% (>= {1}%)" -f $HealthObject.snapshot.cpuLoadPct, $ThresholdCpuLoadPct))
+        Set-Status "WARN"
+    }
+
+    # Memory
+    if ($null -ne $HealthObject.snapshot.memoryUsedPct -and $HealthObject.snapshot.memoryUsedPct -ge $ThresholdMemUsedPct) {
+        $score -= 15
+        $findings.Add(("High memory usage: {0}% (>= {1}%)" -f $HealthObject.snapshot.memoryUsedPct, $ThresholdMemUsedPct))
+        Set-Status "WARN"
+    }
+
+    # Disk
+    $badDisks = @($HealthObject.disks | Where-Object { $null -ne $_.freePct -and $_.freePct -lt $ThresholdDiskFreePct })
+    foreach ($d in $badDisks) {
+        $score -= 10
+        $findings.Add(("Low disk free: {0} {1}% free (< {2}%)" -f $d.drive, $d.freePct, $ThresholdDiskFreePct))
+        Set-Status "WARN"
+    }
+
+    # Critical services
+    $badSvcs = @($HealthObject.services | Where-Object { $_.status -in @("Stopped","Missing","Unknown","Paused") })
+    foreach ($s in $badSvcs) {
+        $score -= 10
+        $findings.Add(("Critical service issue: {0} = {1}" -f $s.name, $s.status))
+        Set-Status "CRITICAL"
+    }
+
+    # Events (sum counts)
+    $eventTotal = 0
+    foreach ($log in @($HealthObject.events)) {
+        if ($null -ne $log.totalCount) { $eventTotal += [int]$log.totalCount }
+    }
+
+    if ($eventTotal -ge $EventCritCount) {
+        $score -= 20
+        $findings.Add(("High Error/Critical event volume: {0} (>= {1})" -f $eventTotal, $EventCritCount))
+        Set-Status "CRITICAL"
+    }
+    elseif ($eventTotal -ge $EventWarnCount) {
+        $score -= 10
+        $findings.Add(("Elevated Error/Critical event volume: {0} (>= {1})" -f $eventTotal, $EventWarnCount))
+        Set-Status "WARN"
+    }
+
+    # Pending reboot
+    if ($HealthObject.reboot.pendingReboot -eq $true) {
+        $score -= 5
+        $findings.Add("Pending reboot detected")
+        Set-Status "WARN"
+    }
+
+    if ($score -lt 0) { $score = 0 }
+    if ($score -gt 100) { $score = 100 }
+    if ($status -eq "OK" -and $score -lt 100) { $status = "WARN" }
+
+    return [ordered]@{
+        score      = $score
+        status     = $status
+        findings   = $findings
+        eventTotal = $eventTotal
+        thresholds = [ordered]@{
+            diskFreePct = $ThresholdDiskFreePct
+            cpuLoadPct  = $ThresholdCpuLoadPct
+            memUsedPct  = $ThresholdMemUsedPct
+            eventWarn   = $EventWarnCount
+            eventCrit   = $EventCritCount
+        }
+    }
 }
 
 function Get-HealthData {
@@ -348,11 +392,12 @@ function Get-HealthData {
 
         # --- Performance snapshot
         $cpuLoad = [math]::Round(($cpu | Measure-Object -Property LoadPercentage -Average).Average, 1)
+
         $memTotalGB = [math]::Round($cs.TotalPhysicalMemory / 1GB, 2)
         $memFreeGB  = [math]::Round($os.FreePhysicalMemory * 1KB / 1GB, 2)
         $memUsedPct = if ($memTotalGB -gt 0) { [math]::Round((($memTotalGB - $memFreeGB) / $memTotalGB) * 100, 1) } else { $null }
 
-        # Processes (local only via Get-Process; for remote, skip or extend using Invoke-Command)
+        # Processes (local only; remote can be extended later)
         $topProcCpu = @()
         $topProcMem = @()
         try {
@@ -409,7 +454,7 @@ function Get-HealthData {
         # --- Event logs
         $eventSummary = @()
         if (-not $SkipEventLogs) {
-            $eventSummary = Get-EventLogSummary -Target $Target -LookbackHours $EventLookbackHours -CimSession $cim
+            $eventSummary = Get-EventLogSummary -Target $Target -LookbackHours $EventLookbackHours
         }
 
         # --- Hotfix
@@ -419,7 +464,6 @@ function Get-HealthData {
                 $hf = if ($Target -eq $env:COMPUTERNAME) {
                     Get-HotFix | Sort-Object -Property InstalledOn -Descending | Select-Object -First 1
                 } else {
-                    # Get-HotFix supports -ComputerName but can be slow; keep best-effort
                     Get-HotFix -ComputerName $Target | Sort-Object -Property InstalledOn -Descending | Select-Object -First 1
                 }
                 if ($hf) {
@@ -437,13 +481,8 @@ function Get-HealthData {
         # --- Pending reboot
         $reboot = Get-PendingRebootStatus -Target $Target -CimSession $cim
 
-        # --- Network (best-effort)
-        $net = [ordered]@{
-            ipv4        = @()
-            gateway     = @()
-            dnsServers  = @()
-        }
-
+        # --- Network (local best-effort)
+        $net = [ordered]@{ ipv4=@(); gateway=@(); dnsServers=@() }
         try {
             if ($Target -eq $env:COMPUTERNAME) {
                 $adapters = Get-NetIPConfiguration | Where-Object { $_.IPv4Address -and $_.NetAdapter.Status -eq "Up" }
@@ -461,34 +500,45 @@ function Get-HealthData {
             collectedAt  = (Get-Date).ToString("o")
 
             system = [ordered]@{
-                hostname    = $cs.Name
-                domain      = $cs.Domain
-                osCaption   = $os.Caption
-                osVersion   = $os.Version
-                osBuild     = $os.BuildNumber
-                manufacturer= $cs.Manufacturer
-                model       = $cs.Model
-                cpuName     = ($cpu | Select-Object -First 1 -ExpandProperty Name)
-                cpuCores    = ($cpu | Measure-Object -Property NumberOfCores -Sum).Sum
-                memoryGB    = $memTotalGB
-                lastBoot    = $boot
-                uptime      = $uptime.ToString()
+                hostname     = $cs.Name
+                domain       = $cs.Domain
+                osCaption    = $os.Caption
+                osVersion    = $os.Version
+                osBuild      = $os.BuildNumber
+                manufacturer = $cs.Manufacturer
+                model        = $cs.Model
+                cpuName      = ($cpu | Select-Object -First 1 -ExpandProperty Name)
+                cpuCores     = ($cpu | Measure-Object -Property NumberOfCores -Sum).Sum
+                memoryGB     = $memTotalGB
+                lastBoot     = $boot
+                uptime       = $uptime.ToString()
             }
 
             snapshot = [ordered]@{
-                cpuLoadPct   = $cpuLoad
-                memoryUsedPct= $memUsedPct
-                topProcCpu   = $topProcCpu
-                topProcMem   = $topProcMem
+                cpuLoadPct    = $cpuLoad
+                memoryUsedPct = $memUsedPct
+                topProcCpu    = $topProcCpu
+                topProcMem    = $topProcMem
             }
 
-            disks     = $diskOut
-            services  = $svcData
-            events    = $eventSummary
-            hotfix    = $hotfix
-            reboot    = $reboot
-            network   = $net
+            disks    = $diskOut
+            services = $svcData
+            events   = $eventSummary
+            hotfix   = $hotfix
+            reboot   = $reboot
+            network  = $net
         }
+
+        # ---- Assessment (score + findings)
+        $result.assessment = Get-HealthAssessment `
+            -HealthObject $result `
+            -ThresholdDiskFreePct $ThresholdDiskFreePct `
+            -ThresholdCpuLoadPct $ThresholdCpuLoadPct `
+            -ThresholdMemUsedPct $ThresholdMemUsedPct `
+            -EventWarnCount $EventWarnCount `
+            -EventCritCount $EventCritCount
+
+        $result.status = $result.assessment.status
 
         return $result
     }
@@ -512,13 +562,12 @@ function ConvertTo-HtmlReport {
         [Parameter(Mandatory)] [string] $Title
     )
 
-    # Lightweight, resume-safe embedded CSS (no external calls)
     $style = @"
 <style>
 body { font-family: Segoe UI, Arial, sans-serif; margin: 20px; }
 h1 { margin-bottom: 4px; }
 .small { color: #666; margin-top: 0px; }
-.card { border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin: 14px 0; }
+.card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin: 14px 0; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 table { border-collapse: collapse; width: 100%; }
 th, td { border: 1px solid #e5e5e5; padding: 8px; font-size: 12px; vertical-align: top; }
@@ -527,6 +576,7 @@ th { background: #f7f7f7; text-align: left; }
 .ok { background: #eef7ee; }
 .warn { background: #fff6e5; }
 .err { background: #fdecec; }
+.findings { margin: 6px 0 0 0; padding-left: 18px; }
 </style>
 "@
 
@@ -534,7 +584,7 @@ th { background: #f7f7f7; text-align: left; }
     $header = "<h1>$Title</h1><p class='small'>Generated: $generated | RunId: $RunId</p>"
 
     $cards = foreach ($h in $HealthObjects) {
-        $statusClass = if ($h.status -eq "OK") { "ok" } elseif ($h.status -eq "Unreachable") { "warn" } else { "err" }
+        $statusClass = if ($h.assessment.status -eq "OK") { "ok" } elseif ($h.assessment.status -eq "WARN") { "warn" } else { "err" }
 
         $diskRows = ($h.disks | ForEach-Object {
             "<tr><td>$($_.drive)</td><td>$($_.label)</td><td>$($_.sizeGB)</td><td>$($_.freeGB)</td><td>$($_.freePct)</td></tr>"
@@ -544,8 +594,14 @@ th { background: #f7f7f7; text-align: left; }
             "<tr><td>$($_.name)</td><td>$($_.status)</td><td>$($_.startMode)</td><td>$($_.error)</td></tr>"
         }) -join ""
 
+        $findingsHtml = if ($h.assessment.findings -and $h.assessment.findings.Count -gt 0) {
+            "<ul class='findings'>" + (($h.assessment.findings | ForEach-Object { "<li>$($_)</li>" }) -join "") + "</ul>"
+        } else {
+            "<p class='small'>No issues detected based on thresholds.</p>"
+        }
+
         $eventRows = ""
-        foreach ($log in ($h.events | ForEach-Object { $_ })) {
+        foreach ($log in @($h.events)) {
             $eventRows += "<h4>$($log.logName) (Errors/Critical since $($log.since))</h4>"
             $eventRows += "<p>Total: $($log.totalCount)</p>"
             if ($log.sampleEvents -and $log.sampleEvents.Count -gt 0) {
@@ -559,12 +615,25 @@ th { background: #f7f7f7; text-align: left; }
             }
         }
 
-        @"
+@"
 <div class='card'>
   <div class='grid'>
     <div>
-      <h2>$($h.computerName) <span class='badge $statusClass'>$($h.status)</span></h2>
+      <h2>$($h.computerName) <span class='badge $statusClass'>$($h.assessment.status)</span></h2>
       <p class='small'>Collected: $($h.collectedAt)</p>
+
+      <table>
+        <thead><tr><th colspan='2'>Assessment</th></tr></thead>
+        <tbody>
+          <tr><td>Health Score</td><td><b>$($h.assessment.score)</b> / 100</td></tr>
+          <tr><td>Event Total</td><td>$($h.assessment.eventTotal)</td></tr>
+          <tr><td>Thresholds</td><td>DiskFree &lt; $($h.assessment.thresholds.diskFreePct)% | CPU ≥ $($h.assessment.thresholds.cpuLoadPct)% | Mem ≥ $($h.assessment.thresholds.memUsedPct)%</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Findings</h3>
+      $findingsHtml
+
       <table>
         <thead><tr><th colspan='2'>System</th></tr></thead>
         <tbody>
@@ -578,6 +647,7 @@ th { background: #f7f7f7; text-align: left; }
         </tbody>
       </table>
     </div>
+
     <div>
       <table>
         <thead><tr><th colspan='2'>Snapshot</th></tr></thead>
@@ -612,7 +682,7 @@ th { background: #f7f7f7; text-align: left; }
 "@
     }
 
-    $html = @"
+    return @"
 <html>
 <head>
 <meta charset='utf-8' />
@@ -624,15 +694,24 @@ $($cards -join "`n")
 </body>
 </html>
 "@
-
-    return $html
 }
 
 # -----------------------------
 # Main
 # -----------------------------
 Initialize-OutputFolders
-Write-Log -Level "INFO" -Message "Run started." -Data @{ computerCount = $ComputerName.Count; outputPath = $OutputPath; eventLookbackHours = $EventLookbackHours }
+Write-Log -Level "INFO" -Message "Run started." -Data @{
+    computerCount = $ComputerName.Count
+    outputPath = $OutputPath
+    eventLookbackHours = $EventLookbackHours
+    thresholds = @{
+        diskFreePct = $ThresholdDiskFreePct
+        cpuLoadPct  = $ThresholdCpuLoadPct
+        memUsedPct  = $ThresholdMemUsedPct
+        eventWarn   = $EventWarnCount
+        eventCrit   = $EventCritCount
+    }
+}
 
 $all = @()
 foreach ($c in $ComputerName) {
@@ -644,7 +723,7 @@ if ($AsSingleReport) {
     $jsonPath = Join-Path $ReportsPath ($baseName + ".json")
     $htmlPath = Join-Path $ReportsPath ($baseName + ".html")
 
-    $json = $all | ConvertTo-Json -Depth 8
+    $json = $all | ConvertTo-Json -Depth 10
     $html = ConvertTo-HtmlReport -HealthObjects $all -Title "Server Health Report (All Targets)"
 
     if ($PSCmdlet.ShouldProcess($jsonPath, "Write JSON report")) { $json | Out-File -FilePath $jsonPath -Encoding utf8 }
@@ -662,26 +741,23 @@ else {
         $jsonPath = Join-Path $ReportsPath ($baseName + ".json")
         $htmlPath = Join-Path $ReportsPath ($baseName + ".html")
 
-        $json = $h | ConvertTo-Json -Depth 8
+        $json = $h | ConvertTo-Json -Depth 10
         $html = ConvertTo-HtmlReport -HealthObjects @($h) -Title ("Server Health Report: {0}" -f $h.computerName)
 
         if ($PSCmdlet.ShouldProcess($jsonPath, "Write JSON report")) { $json | Out-File -FilePath $jsonPath -Encoding utf8 }
         if ($PSCmdlet.ShouldProcess($htmlPath, "Write HTML report")) { $html | Out-File -FilePath $htmlPath -Encoding utf8 }
 
-        Write-Log -Level "INFO" -Message "Report written." -Computer $h.computerName -Data @{ html = $htmlPath; json = $jsonPath; status = $h.status }
+        Write-Log -Level "INFO" -Message "Report written." -Computer $h.computerName -Data @{
+            html = $htmlPath
+            json = $jsonPath
+            status = $h.status
+            score  = $h.assessment.score
+        }
+
+        Write-Output "[$($h.computerName)] Status: $($h.status) | Score: $($h.assessment.score)"
         Write-Output "[$($h.computerName)] HTML: $htmlPath"
         Write-Output "[$($h.computerName)] JSON: $jsonPath"
     }
 }
 
 Write-Log -Level "INFO" -Message "Run completed."
-```
-
----
-
-## Notes 
-Structured JSON logs (easy to ship to Splunk/ELK later)
-Separate HTML + JSON outputs (ops + automation use-cases)
-Per-host fault tolerance (one bad server doesn’t break the run)
-No hardcoding (domain/path/credentials)
-Extensible (you can add thresholds + “overall health score” next)
